@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   BirthdayWish,
   CarvedMessageLayout,
@@ -60,12 +60,44 @@ interface ShorelineCanvasProps {
   waveTriggerCounter: number;
   clearSandCounter: number;
   audioEngine: CoastalAudioEngine;
+  /** Small signature carved in the lower-right sand, washed away and re-carved each cycle */
+  signature?: string;
   onCycleComplete: () => void;
   onTelemetryUpdate: (telemetry: ShorelineTelemetry) => void;
 }
 
-const LOGICAL_WIDTH = 1440;
-const LOGICAL_HEIGHT = 900;
+interface LogicalSize {
+  width: number;
+  height: number;
+}
+
+const LANDSCAPE_LOGICAL_HEIGHT = 900;
+const PORTRAIT_LOGICAL_WIDTH = 820;
+
+/**
+ * Matches the canvas aspect ratio to the viewport so portrait phones see the whole
+ * shoreline instead of a cropped centre strip of a fixed 1440x900 scene.
+ * A 16:10 desktop window still resolves to exactly 1440x900.
+ */
+function pickLogicalSize(cssWidth: number, cssHeight: number): LogicalSize {
+  const aspect = Math.max(0.4, Math.min(2.4, cssWidth / Math.max(1, cssHeight)));
+  if (aspect >= 1) {
+    return { width: Math.round(LANDSCAPE_LOGICAL_HEIGHT * aspect), height: LANDSCAPE_LOGICAL_HEIGHT };
+  }
+  return { width: PORTRAIT_LOGICAL_WIDTH, height: Math.round(PORTRAIT_LOGICAL_WIDTH / aspect) };
+}
+
+function buildSignatureLayout(text: string, width: number, height: number): CarvedMessageLayout {
+  const isPortrait = height > width;
+  return buildMessageStrokePaths(text, width, height, 977, {
+    widthFraction: isPortrait ? 0.62 : 0.34,
+    minReadableCharAdv: isPortrait ? 20 : 14,
+    maxCharAdv: isPortrait ? 22 : 17,
+    centerYFraction: isPortrait ? 0.675 : 0.76,
+    rightEdgeFraction: 0.95,
+    arcLiftPx: -3,
+  });
+}
 
 export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
   currentWish,
@@ -77,10 +109,20 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
   waveTriggerCounter,
   clearSandCounter,
   audioEngine,
+  signature = '',
   onCycleComplete,
   onTelemetryUpdate,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  const [dims, setDims] = useState<LogicalSize>(() =>
+    typeof window === 'undefined'
+      ? { width: 1440, height: LANDSCAPE_LOGICAL_HEIGHT }
+      : pickLogicalSize(window.innerWidth, window.innerHeight)
+  );
+  const dimsRef = useRef<LogicalSize>(dims);
+  dimsRef.current = dims;
 
   const propsRef = useRef({
     currentWish,
@@ -90,6 +132,7 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
     waveIntensityMultiplier,
     stickSeedOffset,
     audioEngine,
+    signature,
     onCycleComplete,
     onTelemetryUpdate,
   });
@@ -103,6 +146,7 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
       waveIntensityMultiplier,
       stickSeedOffset,
       audioEngine,
+      signature,
       onCycleComplete,
       onTelemetryUpdate,
     };
@@ -116,6 +160,10 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
     stick: StickProfile;
     wave: WaveProfile;
     layout: CarvedMessageLayout;
+    signatureLayout: CarvedMessageLayout;
+    signatureDirty: boolean;
+    layoutWidth: number;
+    layoutHeight: number;
     freehandStrokes: CarveStroke[];
     isPointerDown: boolean;
     pointerX: number;
@@ -145,16 +193,20 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
       wave: generateRandomWave(initialSeed + 50, waveIntensityMultiplier),
       layout: buildMessageStrokePaths(
         currentWish.text,
-        LOGICAL_WIDTH,
-        LOGICAL_HEIGHT,
+        dims.width,
+        dims.height,
         initialSeed
       ),
+      signatureLayout: buildSignatureLayout(signature, dims.width, dims.height),
+      signatureDirty: false,
+      layoutWidth: dims.width,
+      layoutHeight: dims.height,
       freehandStrokes: [],
       isPointerDown: false,
-      pointerX: LOGICAL_WIDTH * 0.5,
-      pointerY: LOGICAL_HEIGHT * 0.57,
-      lastPointerX: LOGICAL_WIDTH * 0.5,
-      lastPointerY: LOGICAL_HEIGHT * 0.57,
+      pointerX: dims.width * 0.5,
+      pointerY: dims.height * 0.57,
+      lastPointerX: dims.width * 0.5,
+      lastPointerY: dims.height * 0.57,
       sandParticles: [],
       residualBubbles: [],
       wetReachY: 0,
@@ -184,8 +236,8 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
       sim.wave = generateRandomWave(newSeed + 71, waveIntensityMultiplier);
       sim.layout = buildMessageStrokePaths(
         currentWish.text,
-        LOGICAL_WIDTH,
-        LOGICAL_HEIGHT,
+        dimsRef.current.width,
+        dimsRef.current.height,
         newSeed
       );
       sim.freehandStrokes = [];
@@ -220,8 +272,8 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
       } else {
         sim.layout = buildMessageStrokePaths(
           currentWish.text,
-          LOGICAL_WIDTH,
-          LOGICAL_HEIGHT,
+          dimsRef.current.width,
+          dimsRef.current.height,
           sim.cycleSeed
         );
         sim.phase = 'stick-entering';
@@ -237,13 +289,68 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
     isFreehandMode,
   ]);
 
+  // Re-fit the scene on orientation changes; small jitters are absorbed by object-cover
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      if (width < 2 || height < 2) return;
+      const next = pickLogicalSize(width, height);
+      const current = dimsRef.current;
+      const aspectChange =
+        next.width / next.height / (current.width / current.height);
+      if (Math.abs(aspectChange - 1) > 0.15) {
+        setDims(next);
+      }
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const sim = simRef.current;
+    if (!sim) return;
+    sim.signatureLayout = buildSignatureLayout(signature, dimsRef.current.width, dimsRef.current.height);
+  }, [signature]);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Pre-compute photorealistic normal-mapped sand & full-width cellular Worley seafoam sheet once
+    const LOGICAL_WIDTH = dims.width;
+    const LOGICAL_HEIGHT = dims.height;
+
+    const initialSim = simRef.current;
+    if (
+      initialSim &&
+      (initialSim.layoutWidth !== LOGICAL_WIDTH || initialSim.layoutHeight !== LOGICAL_HEIGHT)
+    ) {
+      initialSim.layoutWidth = LOGICAL_WIDTH;
+      initialSim.layoutHeight = LOGICAL_HEIGHT;
+      initialSim.layout = buildMessageStrokePaths(
+        propsRef.current.currentWish.text,
+        LOGICAL_WIDTH,
+        LOGICAL_HEIGHT,
+        initialSim.cycleSeed
+      );
+      initialSim.signatureLayout = buildSignatureLayout(
+        propsRef.current.signature,
+        LOGICAL_WIDTH,
+        LOGICAL_HEIGHT
+      );
+      initialSim.freehandStrokes = [];
+      initialSim.residualBubbles = [];
+      initialSim.wetReachY = 0;
+      initialSim.pointerX = LOGICAL_WIDTH * 0.5;
+      initialSim.pointerY = LOGICAL_HEIGHT * 0.57;
+      initialSim.lastPointerX = initialSim.pointerX;
+      initialSim.lastPointerY = initialSim.pointerY;
+    }
+
+    // Pre-compute photorealistic normal-mapped sand & full-width cellular Worley seafoam sheet once per size
     const sandBgCanvas = createPhotorealSandCanvas(LOGICAL_WIDTH, LOGICAL_HEIGHT);
     const foamSheetCanvas = createCellularSeafoamTexture(720, 200);
 
@@ -288,7 +395,8 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
     const drawCarvedStrokeSegment = (
       c: CanvasRenderingContext2D,
       pts: CarvePoint[],
-      maxIndex: number
+      maxIndex: number,
+      scale: number = 1
     ) => {
       if (pts.length < 2 || maxIndex < 1) return;
       const limit = Math.min(pts.length - 1, maxIndex);
@@ -301,7 +409,7 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
         if (intact <= 0.02) continue;
 
         // As water washes over, the groove widens and softens before vanishing
-        const widthScale = midPt.pressure * (1 + midPt.erosion * 0.85);
+        const widthScale = midPt.pressure * (1 + midPt.erosion * 0.85) * scale;
 
         // 1. Wide soft ambient occlusion around the displaced sand berm
         c.beginPath();
@@ -317,9 +425,9 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
 
         // 2. Sunlit upper-left displaced sand berm mound (pushed up by the stick)
         c.beginPath();
-        c.moveTo(pts[start].x - 3.2, pts[start].y - 3.6);
+        c.moveTo(pts[start].x - 3.2 * scale, pts[start].y - 3.6 * scale);
         for (let i = start + 1; i <= end; i++) {
-          c.lineTo(pts[i].x - 3.2, pts[i].y - 3.6);
+          c.lineTo(pts[i].x - 3.2 * scale, pts[i].y - 3.6 * scale);
         }
         c.strokeStyle = `rgba(248, 232, 198, ${0.82 * intact * intact})`;
         c.lineWidth = 7.2 * widthScale;
@@ -329,9 +437,9 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
 
         // 3. Shaded lower-right displaced sand berm slope
         c.beginPath();
-        c.moveTo(pts[start].x + 3.2, pts[start].y + 3.4);
+        c.moveTo(pts[start].x + 3.2 * scale, pts[start].y + 3.4 * scale);
         for (let i = start + 1; i <= end; i++) {
-          c.lineTo(pts[i].x + 3.2, pts[i].y + 3.4);
+          c.lineTo(pts[i].x + 3.2 * scale, pts[i].y + 3.4 * scale);
         }
         c.strokeStyle = `rgba(148, 114, 72, ${0.72 * intact})`;
         c.lineWidth = 6.8 * widthScale;
@@ -353,9 +461,9 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
 
         // 5. Darkest damp bottom V-channel scratch line
         c.beginPath();
-        c.moveTo(pts[start].x + 0.5, pts[start].y + 0.7);
+        c.moveTo(pts[start].x + 0.5 * scale, pts[start].y + 0.7 * scale);
         for (let i = start + 1; i <= end; i++) {
-          c.lineTo(pts[i].x + 0.5, pts[i].y + 0.7);
+          c.lineTo(pts[i].x + 0.5 * scale, pts[i].y + 0.7 * scale);
         }
         c.strokeStyle = `rgba(54, 36, 18, ${0.90 * intact * intact})`;
         c.lineWidth = 2.6 * widthScale;
@@ -369,13 +477,13 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
             const p = pts[i];
             const hash = Math.sin(p.x * 12.9898 + p.y * 78.233) * 43758.5453;
             const frac = hash - Math.floor(hash);
-            const spread = 4.2 + frac * 3.8;
+            const spread = (4.2 + frac * 3.8) * scale;
             c.fillStyle =
               frac > 0.45
                 ? `rgba(250, 235, 202, ${0.78 * intact})`
                 : `rgba(116, 86, 48, ${0.68 * intact})`;
-            c.fillRect(p.x - spread, p.y - spread * 0.9, 1.9, 1.9);
-            c.fillRect(p.x + spread * 0.85, p.y + spread, 1.7, 1.7);
+            c.fillRect(p.x - spread, p.y - spread * 0.9, 1.9 * scale, 1.9 * scale);
+            c.fillRect(p.x + spread * 0.85, p.y + spread, 1.7 * scale, 1.7 * scale);
           }
         }
       }
@@ -881,6 +989,7 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
           }
 
           if (transition.completedFullCycle) {
+            sim.signatureDirty = true;
             if (freehand) {
               sim.freehandStrokes = [];
               sim.phase = 'writing';
@@ -944,6 +1053,27 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
           LOGICAL_HEIGHT,
           dtSec
         );
+        if (sim.signatureLayout.strokes.length > 0) {
+          applyWaveErosionToLayout(
+            sim.signatureLayout,
+            sim.wave,
+            phaseProgress,
+            sim.phase,
+            sim.totalElapsedSec,
+            LOGICAL_WIDTH,
+            LOGICAL_HEIGHT,
+            dtSec
+          );
+          // Backwash slumps whatever the swash edge missed so the signature always re-carves fresh
+          if (sim.phase === 'wave-receding') {
+            for (const s of sim.signatureLayout.strokes) {
+              for (const p of s.points) {
+                p.erosion = Math.min(1, p.erosion + dtSec * 0.35);
+              }
+            }
+          }
+          sim.signatureDirty = true;
+        }
         if (sim.freehandStrokes.length > 0) {
           applyWaveErosionToLayout(
             {
@@ -959,6 +1089,47 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
             LOGICAL_HEIGHT,
             dtSec
           );
+        }
+      }
+
+      // 3b. Signature quietly re-carves itself alongside each wish, then washes away with it
+      if (
+        sim.signatureDirty &&
+        (sim.phase === 'stick-entering' || (freehand && sim.phase === 'writing'))
+      ) {
+        sim.signatureLayout = buildSignatureLayout(
+          propsRef.current.signature,
+          LOGICAL_WIDTH,
+          LOGICAL_HEIGHT
+        );
+        sim.signatureDirty = false;
+      }
+      const signatureReveal = freehand
+        ? 1
+        : sim.phase === 'stick-entering'
+          ? 0
+          : sim.phase === 'writing'
+            ? phaseProgress
+            : 1;
+      if (signatureReveal > 0 && sim.signatureLayout.strokes.length > 0) {
+        const sigScale = sim.signatureLayout.carveScale ?? 0.4;
+        const sigBudget = signatureReveal * sim.signatureLayout.totalLength;
+        let sigAcc = 0;
+        for (const stroke of sim.signatureLayout.strokes) {
+          if (sigBudget <= sigAcc) break;
+          const localDist = sigBudget - sigAcc;
+          let maxPtIdx = stroke.points.length - 1;
+          if (localDist < stroke.length) {
+            maxPtIdx = 0;
+            while (
+              maxPtIdx < stroke.points.length - 1 &&
+              stroke.points[maxPtIdx + 1].cumulativeDist <= localDist
+            ) {
+              maxPtIdx++;
+            }
+          }
+          drawCarvedStrokeSegment(ctx, stroke.points, maxPtIdx, sigScale);
+          sigAcc += stroke.length;
         }
       }
 
@@ -1036,13 +1207,14 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
           sim.layout.totalLength +
           Math.max(0, sim.layout.strokes.length - 1) * liftGapDist;
         const carvedDistBudget = writeProg * totalWithGaps;
+        const wishScale = sim.layout.carveScale ?? 1;
 
         let acc = 0;
         for (const stroke of sim.layout.strokes) {
           if (carvedDistBudget <= acc) break;
           const localDist = carvedDistBudget - acc;
           if (localDist >= stroke.length) {
-            drawCarvedStrokeSegment(ctx, stroke.points, stroke.points.length - 1);
+            drawCarvedStrokeSegment(ctx, stroke.points, stroke.points.length - 1, wishScale);
           } else {
             let maxPtIdx = 0;
             for (let j = 0; j < stroke.points.length; j++) {
@@ -1052,7 +1224,7 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
                 break;
               }
             }
-            drawCarvedStrokeSegment(ctx, stroke.points, maxPtIdx);
+            drawCarvedStrokeSegment(ctx, stroke.points, maxPtIdx, wishScale);
           }
           acc += stroke.length + liftGapDist;
         }
@@ -1135,19 +1307,29 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
       if (timerId) clearTimeout(timerId);
       cancelAnimationFrame(animId);
     };
-  }, []);
+  }, [dims.width, dims.height]);
 
   const getLogicalCoords = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
+    const { width: LOGICAL_WIDTH, height: LOGICAL_HEIGHT } = dimsRef.current;
     if (!canvas) return { x: LOGICAL_WIDTH * 0.5, y: LOGICAL_HEIGHT * 0.5 };
     const rect = canvas.getBoundingClientRect();
-    const scaleX = LOGICAL_WIDTH / Math.max(1, rect.width);
-    const scaleY = LOGICAL_HEIGHT / Math.max(1, rect.height);
+    // The canvas is drawn with object-cover, so undo its uniform scale and centred crop
+    const coverScale = Math.max(
+      rect.width / LOGICAL_WIDTH,
+      rect.height / LOGICAL_HEIGHT,
+      0.0001
+    );
+    const offsetX = (rect.width - LOGICAL_WIDTH * coverScale) / 2;
+    const offsetY = (rect.height - LOGICAL_HEIGHT * coverScale) / 2;
     return {
-      x: Math.max(24, Math.min(LOGICAL_WIDTH - 24, (e.clientX - rect.left) * scaleX)),
+      x: Math.max(
+        24,
+        Math.min(LOGICAL_WIDTH - 24, (e.clientX - rect.left - offsetX) / coverScale)
+      ),
       y: Math.max(
         LOGICAL_HEIGHT * 0.18,
-        Math.min(LOGICAL_HEIGHT - 24, (e.clientY - rect.top) * scaleY)
+        Math.min(LOGICAL_HEIGHT - 24, (e.clientY - rect.top - offsetY) / coverScale)
       ),
     };
   };
@@ -1211,17 +1393,17 @@ export const ShorelineCanvas: React.FC<ShorelineCanvasProps> = ({
   };
 
   return (
-    <div className="relative w-full h-full overflow-hidden bg-[#C8AC7E]">
+    <div ref={containerRef} className="relative w-full h-full overflow-hidden bg-[#C8AC7E]">
       <canvas
         ref={canvasRef}
         data-testid="shoreline-canvas"
-        width={LOGICAL_WIDTH}
-        height={LOGICAL_HEIGHT}
+        width={dims.width}
+        height={dims.height}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
-        className={`w-full h-full object-cover select-none ${
+        className={`w-full h-full object-cover select-none touch-manipulation ${
           isFreehandMode ? 'cursor-crosshair touch-none' : 'cursor-default'
         }`}
         aria-label={`Interactive shoreline sand canvas currently carving wish ${currentWish.index}: ${currentWish.text.replace('\n', ' ')}`}

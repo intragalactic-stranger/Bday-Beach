@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_BIRTHDAY_WISHES,
   generateRandomStick,
   generateRandomWave,
   evaluateWaveEdgeY,
@@ -9,16 +8,58 @@ import {
   evaluateWritingState,
   applyWaveErosionToLayout,
   advancePhaseTimer,
+  isCarvableText,
 } from './shorelineEngine';
+import { buildBirthdayWishes, refreshLiveWish, resolveBirthdayDetails } from '../data/wishes';
 
-test('DEFAULT_BIRTHDAY_WISHES contains exactly 10 distinct birthday messages', () => {
-  assert.equal(DEFAULT_BIRTHDAY_WISHES.length, 10);
-  const uniqueIds = new Set(DEFAULT_BIRTHDAY_WISHES.map((w) => w.id));
-  assert.equal(uniqueIds.size, 10);
-  for (const wish of DEFAULT_BIRTHDAY_WISHES) {
-    assert.ok(wish.text.trim().length > 10, `Wish ${wish.id} should have meaningful text`);
-    assert.ok(wish.subtitle.trim().length > 3);
+test('buildBirthdayWishes personalises 20 distinct, fully carvable wishes', () => {
+  const details = resolveBirthdayDetails(
+    { name: 'Priya', birthDate: '2006-11-02', birthTime: '05:42' },
+    new Date(2026, 10, 2, 9, 0)
+  );
+  assert.equal(details.age, 20);
+  assert.equal(details.ageOrdinal, '20th');
+  assert.equal(details.timeLabel, '5:42 AM');
+  assert.equal(details.dateShort, '2 Nov');
+
+  const wishes = buildBirthdayWishes(details, new Date(2026, 10, 2, 9, 0));
+  assert.equal(wishes.length, 20);
+  assert.equal(new Set(wishes.map((w) => w.id)).size, 20);
+  for (const wish of wishes) {
+    assert.ok(!/[{}]/.test(wish.text + wish.subtitle + (wish.note ?? '')), `Unfilled placeholder in ${wish.id}`);
+    assert.ok(isCarvableText(wish.text), `Wish ${wish.id} has characters the stick cannot carve: ${wish.text}`);
+    assert.ok((wish.note ?? '').length > 20, `Wish ${wish.id} should carry a love note`);
   }
+});
+
+test('the live wish counts hours, minutes and seconds since the birth moment', () => {
+  const details = resolveBirthdayDetails(
+    { name: 'A', birthDate: '2006-11-02', birthTime: '05:42' },
+    new Date(2026, 10, 2)
+  );
+  // Exactly 2 days, 3 minutes and 7 seconds after birth
+  const now = new Date(2006, 10, 4, 5, 45, 7);
+  const live = buildBirthdayWishes(details, now).find((w) => w.live);
+  assert.ok(live, 'Expected one live wish');
+  assert.match(live.text, /^It's been 48 hours,\n3 minutes & 7 seconds\nsince you came ♥$/);
+
+  const later = refreshLiveWish(live, details, new Date(2026, 10, 2, 5, 42, 0));
+  assert.match(later.text, /175,3\d\d hours/);
+});
+
+test('resolveBirthdayDetails uses the nearest birthday so the age reads right on either side of it', () => {
+  const input = { name: 'A', birthDate: '2006-01-02', birthTime: '23:15' };
+  assert.equal(resolveBirthdayDetails(input, new Date(2025, 11, 30)).age, 20);
+  assert.equal(resolveBirthdayDetails(input, new Date(2026, 0, 5)).age, 20);
+  assert.equal(resolveBirthdayDetails(input, new Date(2026, 0, 5)).timeLabel, '11:15 PM');
+});
+
+test('buildMessageStrokePaths re-wraps long lines to stay inside a portrait phone canvas', () => {
+  const width = 820;
+  const height = 1775;
+  const layout = buildMessageStrokePaths("I'd write your name\non every shore", width, height, 3);
+  assert.ok(layout.boundingBox.minX >= 0, `Text starts off-canvas at ${layout.boundingBox.minX}`);
+  assert.ok(layout.boundingBox.maxX <= width, `Text runs off-canvas at ${layout.boundingBox.maxX}`);
 });
 
 test('generateRandomStick produces valid driftwood/twig profiles and varies across seeds', () => {

@@ -42,15 +42,15 @@ export const PromptModal: React.FC<PromptModalProps> = ({ isOpen, onClose }) => 
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-3 sm:p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="prompt-modal-title"
     >
-      <div className="relative w-full max-w-3xl rounded-xl border border-slate-800 bg-slate-900 p-6 shadow-2xl flex flex-col max-h-[86vh]">
+      <div className="relative w-full max-w-3xl rounded-xl border border-slate-800 bg-slate-900 p-4 sm:p-6 shadow-2xl flex flex-col max-h-[86dvh]">
         <div className="flex items-start justify-between gap-4 pb-4 border-b border-slate-800">
           <div>
-            <h2 id="prompt-modal-title" className="text-xl font-semibold text-slate-100 font-display">
+            <h2 id="prompt-modal-title" className="text-lg sm:text-xl font-semibold text-slate-100 font-display">
               One-Shot Claude Code Architecture Prompt
             </h2>
             <p className="text-sm text-slate-400 mt-1">
@@ -73,8 +73,8 @@ export const PromptModal: React.FC<PromptModalProps> = ({ isOpen, onClose }) => 
           </pre>
         </div>
 
-        <div className="flex items-center justify-between gap-4 pt-3 border-t border-slate-800">
-          <div className="text-xs text-slate-400">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4 pt-3 border-t border-slate-800">
+          <div className="hidden sm:block text-xs text-slate-400">
             <span>Includes 5-Phase Shoreline State Machine</span>
             <span className="mx-2" aria-hidden="true">·</span>
             <span>Catmull-Rom Stick Handwriting</span>
@@ -82,11 +82,11 @@ export const PromptModal: React.FC<PromptModalProps> = ({ isOpen, onClose }) => 
             <span>Multi-Harmonic Seafoam Waves</span>
           </div>
 
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="flex items-center gap-3 shrink-0 [&>button]:flex-1 sm:[&>button]:flex-none">
             <button
               type="button"
               onClick={handleDownload}
-              className="flex items-center gap-2 px-4 py-2 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors whitespace-nowrap shrink-0"
+              className="flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium text-slate-200 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors whitespace-nowrap shrink-0"
             >
               <Download className="w-4 h-4" />
               <span>Download .md</span>
@@ -95,7 +95,7 @@ export const PromptModal: React.FC<PromptModalProps> = ({ isOpen, onClose }) => 
             <button
               type="button"
               onClick={handleCopy}
-              className="flex items-center gap-2 px-4 py-2 text-xs font-medium text-white bg-[#0284C7] hover:bg-[#0369A1] rounded-lg transition-colors whitespace-nowrap shrink-0"
+              className="flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium text-white bg-[#0284C7] hover:bg-[#0369A1] rounded-lg transition-colors whitespace-nowrap shrink-0"
             >
               {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
               <span>{copied ? 'Copied to Clipboard' : 'Copy One-Shot Prompt'}</span>

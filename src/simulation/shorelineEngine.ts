@@ -10,6 +10,10 @@ export interface BirthdayWish {
   index: number;
   text: string;
   subtitle: string;
+  /** Longer love note shown under the sand (any characters, never carved) */
+  note?: string;
+  /** Text depends on the current time (e.g. a since-you-were-born counter) and is refilled each time it is carved */
+  live?: boolean;
 }
 
 export interface StickKnot {
@@ -97,6 +101,8 @@ export interface CarveStroke {
 export interface CarvedMessageLayout {
   strokes: CarveStroke[];
   totalLength: number;
+  /** Groove thickness multiplier so smaller lettering keeps crisp, legible trenches */
+  carveScale?: number;
   boundingBox: {
     minX: number;
     maxX: number;
@@ -114,69 +120,6 @@ export interface StickTipState {
   pressure: number;
   liftHeightPx: number;
 }
-
-export const DEFAULT_BIRTHDAY_WISHES: BirthdayWish[] = [
-  {
-    id: 'wish-1',
-    index: 1,
-    text: 'Happy Birthday!\nMay your year shine ♥',
-    subtitle: 'Opening Golden Shore Wish',
-  },
-  {
-    id: 'wish-2',
-    index: 2,
-    text: 'Another year wiser,\nkinder & brighter ★',
-    subtitle: 'Wisdom & Radiance',
-  },
-  {
-    id: 'wish-3',
-    index: 3,
-    text: 'May every wave bring\nyou joy and peace',
-    subtitle: 'Ocean Serenity Blessing',
-  },
-  {
-    id: 'wish-4',
-    index: 4,
-    text: 'Here is to wild dreams\n& endless laughter!',
-    subtitle: 'Adventure & Joy',
-  },
-  {
-    id: 'wish-5',
-    index: 5,
-    text: 'Born to sparkle like\nsunlight on the sea ★',
-    subtitle: 'Sunlit Horizon Note',
-  },
-  {
-    id: 'wish-6',
-    index: 6,
-    text: 'Warm sands, calm tides\n& boundless magic ♥',
-    subtitle: 'Coastal Harmony',
-  },
-  {
-    id: 'wish-7',
-    index: 7,
-    text: 'Cheers to your happiest\nchapter yet!',
-    subtitle: 'Milestone Toast',
-  },
-  {
-    id: 'wish-8',
-    index: 8,
-    text: 'You make the world\nso much brighter ♥',
-    subtitle: 'Heartfelt Gratitude',
-  },
-  {
-    id: 'wish-9',
-    index: 9,
-    text: 'May the ocean breeze\ncarry your wishes true',
-    subtitle: 'Tradewind Promise',
-  },
-  {
-    id: 'wish-10',
-    index: 10,
-    text: 'Happy Birthday!\nCelebrate every moment ★',
-    subtitle: 'Grand Finale Wish',
-  },
-];
 
 /** Deterministic mulberry32 PRNG for reproducible tests and organic variety */
 export function createSeededRandom(seed: number): () => number {
@@ -644,6 +587,10 @@ const GLYPH_PATHS: Record<string, Array<Array<[number, number]>>> = {
   '-': [
     [[0.22, 0.54], [0.50, 0.52], [0.78, 0.54]],
   ],
+  ':': [
+    [[0.46, 0.40], [0.54, 0.46]],
+    [[0.44, 0.86], [0.52, 0.92]],
+  ],
   '&': [
     [[0.86, 0.92], [0.56, 0.68], [0.26, 0.38], [0.32, 0.12], [0.58, 0.08], [0.74, 0.24], [0.52, 0.46], [0.18, 0.68], [0.26, 0.92], [0.58, 0.94], [0.88, 0.64]],
   ],
@@ -769,6 +716,62 @@ function interpolateStrokePoints(
   return dense;
 }
 
+/** True when every character can be hand-carved (unknown glyphs would fall back to ★). */
+export function isCarvableText(text: string): boolean {
+  for (const ch of text) {
+    if (ch === ' ' || ch === '\n') continue;
+    if (!GLYPH_PATHS[ch] && !GLYPH_PATHS[ch.toUpperCase()]) return false;
+  }
+  return true;
+}
+
+/**
+ * Splits one authored line into the fewest lines that fit maxChars, then balances them
+ * so narrow phone screens never end with a lonely orphan word.
+ */
+function wrapLineBalanced(line: string, maxChars: number): string[] {
+  if (line.length <= maxChars) return [line];
+  const words = line.split(/\s+/).filter(Boolean);
+  const greedy = (limit: number): string[] => {
+    const out: string[] = [];
+    let cur = '';
+    for (const w of words) {
+      const next = cur ? `${cur} ${w}` : w;
+      if (next.length > limit && cur) {
+        out.push(cur);
+        cur = w;
+      } else {
+        cur = next;
+      }
+    }
+    if (cur) out.push(cur);
+    return out;
+  };
+  const target = greedy(maxChars);
+  let best = target;
+  for (let limit = maxChars - 1; limit > 0; limit--) {
+    const attempt = greedy(limit);
+    if (attempt.length > target.length) break;
+    best = attempt;
+  }
+  return best;
+}
+
+export interface MessageLayoutOptions {
+  /** Fraction of canvas width the lettering may span */
+  widthFraction?: number;
+  /** Lines are re-wrapped when letters would shrink below this advance (px) */
+  minReadableCharAdv?: number;
+  /** Upper bound for the per-character advance (px) */
+  maxCharAdv?: number;
+  /** Vertical centre of the text block as a fraction of canvas height */
+  centerYFraction?: number;
+  /** Right-align against this x fraction instead of centring (used for the signature) */
+  rightEdgeFraction?: number;
+  /** Baseline arc lift in px (negative arcs upward) */
+  arcLiftPx?: number;
+}
+
 /**
  * Builds the complete hand-carved sand stroke geometry for a multi-line message.
  */
@@ -776,13 +779,29 @@ export function buildMessageStrokePaths(
   message: string,
   canvasWidth: number,
   canvasHeight: number,
-  seed: number = 101
+  seed: number = 101,
+  options: MessageLayoutOptions = {}
 ): CarvedMessageLayout {
   const rand = createSeededRandom(seed);
+  const isPortrait = canvasHeight > canvasWidth;
+  const {
+    widthFraction = isPortrait ? 0.86 : 0.74,
+    minReadableCharAdv = 38,
+    maxCharAdv: maxCharAdvCap = 54,
+    centerYFraction = isPortrait ? 0.5 : 0.57,
+    rightEdgeFraction,
+    arcLiftPx = -12,
+  } = options;
+
+  // Fit boldly in the prime golden damp/dry sand zone (40% to 78% of canvas height)
+  const usableWidth = canvasWidth * widthFraction;
+  const maxCharsPerLine = Math.max(6, Math.floor(usableWidth / minReadableCharAdv));
+
   const lines = message
     .split('\n')
     .map((l) => l.trim())
-    .filter((l) => l.length > 0);
+    .filter((l) => l.length > 0)
+    .flatMap((l) => wrapLineBalanced(l, maxCharsPerLine));
 
   if (lines.length === 0) {
     lines.push('Happy Birthday!');
@@ -790,15 +809,17 @@ export function buildMessageStrokePaths(
 
   const maxCharsInLine = Math.max(...lines.map((l) => l.length), 1);
 
-  // Fit boldly in the prime golden damp/dry sand zone (40% to 78% of canvas height)
-  const usableWidth = canvasWidth * 0.74;
-  const maxCharAdv = Math.min(54, Math.max(20, usableWidth / Math.max(8, maxCharsInLine)));
+  const maxCharAdv = Math.min(
+    maxCharAdvCap,
+    Math.max(Math.min(20, maxCharAdvCap), usableWidth / Math.max(8, maxCharsInLine))
+  );
   const charWidth = maxCharAdv * 0.78;
   const charHeight = maxCharAdv * 1.40;
   const lineGap = charHeight * 1.54;
+  const carveScale = Math.max(0.3, Math.min(1, maxCharAdv / 42));
 
   const totalBlockHeight = (lines.length - 1) * lineGap + charHeight;
-  const centerY = canvasHeight * 0.57;
+  const centerY = canvasHeight * centerYFraction;
   const startBlockY = centerY - totalBlockHeight / 2;
 
   const strokes: CarveStroke[] = [];
@@ -812,11 +833,14 @@ export function buildMessageStrokePaths(
   for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
     const line = lines[lineIdx];
     const lineWidth = line.length * maxCharAdv;
-    const startX = (canvasWidth - lineWidth) / 2;
+    const startX =
+      rightEdgeFraction !== undefined
+        ? canvasWidth * rightEdgeFraction - lineWidth
+        : (canvasWidth - lineWidth) / 2;
     const baseLineY = startBlockY + lineIdx * lineGap;
 
     // Gentle natural human baseline arc across the beach slope
-    const lineArcLift = -12;
+    const lineArcLift = arcLiftPx;
 
     for (let charIdx = 0; charIdx < line.length; charIdx++) {
       const ch = line[charIdx];
@@ -877,6 +901,7 @@ export function buildMessageStrokePaths(
   return {
     strokes,
     totalLength: Math.max(1, totalLength),
+    carveScale,
     boundingBox: { minX, maxX, minY, maxY },
   };
 }
