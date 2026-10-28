@@ -1,0 +1,6 @@
+{
+  "name": "Shoreline Wishes — Interactive Sand & Wave Studio",
+  "description": "An authentic coastal shoreline experience where randomized driftwood sticks carve birthday wishes and messages into textured beach sand before realistic foaming ocean waves wash them clean.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
